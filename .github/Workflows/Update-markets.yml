@@ -1,0 +1,129 @@
+name: Update market data
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch market data
+        shell: python
+        run: |
+          import json
+          import urllib.request
+          import datetime
+
+          symbols = {
+              "VOO": "VOO",
+              "QQQ": "QQQ",
+              "DJI": "%5EDJI"
+          }
+
+          out = {}
+
+          for key, symbol in symbols.items():
+
+              url = (
+                  f"https://query1.finance.yahoo.com/v8/finance/chart/"
+                  f"{symbol}?range=1d&interval=5m&includePrePost=false"
+              )
+
+              request = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "Mozilla/5.0"}
+              )
+
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  data = json.load(response)
+
+              result = data["chart"]["result"][0]
+              meta = result["meta"]
+
+              price = (
+                  meta.get("regularMarketPrice")
+                  or meta.get("previousClose")
+              )
+
+              previous = (
+                  meta.get("chartPreviousClose")
+                  or meta.get("previousClose")
+              )
+
+              change = (
+                  price - previous
+                  if price is not None and previous is not None
+                  else 0
+              )
+
+              percent = (
+                  change / previous * 100
+                  if previous
+                  else 0
+              )
+
+              closes = []
+
+              quote = (
+                  result
+                  .get("indicators", {})
+                  .get("quote", [{}])[0]
+                  .get("close")
+                  or []
+              )
+
+              for value in quote:
+                  if value is not None:
+                      closes.append(float(value))
+
+              closes = closes[-30:]
+
+              if len(closes) >= 2:
+
+                  low = min(closes)
+                  high = max(closes)
+                  span = high - low or 1
+
+                  points = " ".join(
+                      f"{i/(len(closes)-1)*100:.1f},"
+                      f"{28-(value-low)/span*23:.1f}"
+                      for i, value in enumerate(closes)
+                  )
+
+              else:
+                  points = "0,20 20,18 40,19 60,12 80,14 100,7"
+
+              out[key] = {
+                  "price": price,
+                  "change": change,
+                  "pct": percent,
+                  "points": points
+              }
+
+          out["updated"] = datetime.datetime.now(
+              datetime.timezone.utc
+          ).isoformat()
+
+          with open("market.json", "w", encoding="utf-8") as file:
+              json.dump(out, file, separators=(",", ":"))
+
+      - name: Commit market data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add market.json
+
+          git diff --cached --quiet || git commit \
+            -m "Update market data"
+
+          git push
